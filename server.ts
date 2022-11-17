@@ -1,15 +1,15 @@
 //import {Server as HttpServer} from 'github://kwruntime/std@1a17653/http/server.ts'
 //import {Router} from 'github://kwruntime/std@1a17653/http/router.ts'
 
-import {Server as HttpServer} from '../std/http/server.ts'
-import {Router} from '../std/http/router.ts'
+import {Server as HttpServer} from 'github://kwruntime/std@4fe87b1/http/server.ts'
+import {Router} from 'github://kwruntime/std@4fe87b1/http/router.ts'
 
-import {HttpContext} from 'github://kwruntime/std@1a17653/http/context.ts'
+import {HttpContext} from 'github://kwruntime/std@4fe87b1/http/context.ts'
 import { Manager } from './manager.ts'
 
-import {JsonParser} from 'github://kwruntime/std@1a17653/http/parsers/json.ts'
-import {TextParser} from 'github://kwruntime/std@1a17653/http/parsers/text.ts'
-import {FormEncoded} from 'github://kwruntime/std@1a17653/http/parsers/form-encoded.ts'
+import {JsonParser} from 'github://kwruntime/std@4fe87b1/http/parsers/json.ts'
+import {TextParser} from 'github://kwruntime/std@4fe87b1/http/parsers/text.ts'
+import {FormEncoded} from 'github://kwruntime/std@4fe87b1/http/parsers/form-encoded.ts'
 const shareSymbol = Symbol("share")
 
 export interface ModuleInfo{
@@ -25,23 +25,29 @@ export interface RouteModuleHandler{
 }
 
 
-
-
 export class Server extends HttpServer{
 	
 	master: Manager	
 	[shareSymbol] = true	
 	#handler : Function
 	#prepare : Function
-	#routes : Array<RouteHandler> 
+	#routes = new  Array<RouteHandler>()
 	#router = new Router()
 	
+	async executeMethod(handler: ModuleInfo){
+		let mod = await import(handler.url)
+		let xhandler = mod[handler.exportName || "default"]
+		return await xhandler(this)
+	}
+
 	async setCustomHandler(handler: ModuleInfo){
 		let mod = await import(handler.url)
 		this.#handler = mod[handler.exportName || "default"]
-		if(mod.prepare){
-			this.#prepare = mod.prepare
-		}
+	}
+
+	async setStartupHandler(handler: ModuleInfo){
+		let mod = await import(handler.url)
+		this.#prepare = mod[handler.exportName || "default"]
 	}
 
 	#checkFunc(id: string, handle: Function){
@@ -88,13 +94,16 @@ export class Server extends HttpServer{
 
 		let context = event.data as HttpContext
 		if(event.type == "request" || event.type == "upgrade"){
-			context.request.urlInfo.original = context.request.headers["caddy-web-url"] as string 
+			//context.request.urlInfo.original = context.request.headers["caddy-web-url"] as string 
 			await this.#router.lookup(event.data)
 		}		
 		if(context.reply && !context.reply.raw.writableEnded){
 			if(event.type == "request"){
 				await context.reply.send({
-					hello:'world',
+					error: {
+						message: "Page not found",
+						code: "NOT_FOUND"
+					},
 					path: context.request.uri.pathname,
 					pid: process.pid
 				})

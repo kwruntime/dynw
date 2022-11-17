@@ -11,13 +11,19 @@ import fs from 'fs'
 import crypto from 'crypto'
 //import * as async from "gh+/kwruntime/std@1.1.4/util/async.ts"
 import uniqid from "npm://uniqid@5.4.0"
-import {Exception} from "gh+/kwruntime/std@1.1.19/util/exception.ts"
-import {AsyncEventEmitter} from "gh+/kwruntime/std@1.1.19/async/events.ts"
-import {Tmux} from "gitlab://jamesxt94/tmux@dcc942c7/src/Tmux.ts"
-import {Server as MeshaServer} from 'gitlab://jamesxt94/mesha@b4efe95a/Server.ts'
-import {Client} from 'gitlab://jamesxt94/mesha@b4efe95a/Client.ts'
-import {ClientSocket} from 'gitlab://jamesxt94/mesha@b4efe95a/ClientSocket.ts'
-import {RPC} from 'gitlab://jamesxt94/mesha@b4efe95a/RPC.ts'
+import {Exception} from "gh+/kwruntime/std@4fe87b1/util/exception.ts"
+import {AsyncEventEmitter} from "gh+/kwruntime/std@4fe87b1/async/events.ts"
+
+
+import {Tmux} from "gitlab://jamesxt94/tmux@6187c824/src/v2/tmux.ts"
+//emport {Tmux} from "/data/projects/Kodhe/tmux/src/v2/tmux.ts"
+
+
+import {Server as MeshaServer} from 'gitlab://jamesxt94/mesha@2.0.2/src/server.ts'
+import {Client} from 'gitlab://jamesxt94/mesha@2.0.2/src/clients/default.ts'
+import {RPC} from 'gitlab://jamesxt94/mesha@2.0.2/src/rpc.ts'
+
+
 
 import {parse} from "gitlab://jamesxt94/codes@88af0824/cli-params.ts"
 import {kawix} from "github://kwruntime/core@68f0642/src/kwruntime.ts"
@@ -91,8 +97,15 @@ export class Program{
 				console.info("kmux:status:listen:", Buffer.from(JSON.stringify(addr)).toString('base64'),"$$")
 				console.info("Server listen on:", addr)
 
+
+
 				let server = new MeshaServer()
 				server.on("error", console.error)
+				server.shared.set("server", serv)
+
+				
+
+				/*
 				server.on("client", (socket : ClientSocket)=>{
 					let rpc = new RPC()
 					rpc.channel = socket
@@ -102,14 +115,20 @@ export class Program{
 						rpc = null
 					})
 				})
+				*/
+
 				if(cli.params.dynwid){
-					let client = await Client.connectLocal(cli.params.dynwid)
-					const rpc = new RPC()
-					rpc.channel = client  
-					rpc.init()	
+
+					let client = new Client()
+					await client.connect("local+" + cli.params.dynwid) 
+					const rpc = client.rpc
+
+					client.on("error",console.error)
+					rpc.on("error",console.error)
+
+					
 					let manager = await rpc.defaultScope.remote("manager")
 					serv.master = manager
-
 					await manager.$addCluster(cli.params.id, serv)
 				}
 
@@ -117,7 +136,7 @@ export class Program{
 				await serv.init()
 			}
 		}catch(e){
-			console.error("> Failed to execute:", e.message)
+			console.error("> Failed to execute:", e)
 		}
 	}
 }
@@ -128,6 +147,7 @@ export class Program{
 export class Router {
 	#manager: Manager
 	#routes: Array<RouteHandler> = []
+	#defaults: Array<RouteHandler> = []
 	#native: Array<RouteHandler> = []
 
 	constructor(m:Manager){
@@ -158,20 +178,34 @@ export class Router {
 		
 	}
 
+	addDefault(handler: RouteHandler){
+		this.#defaults.push(handler)
+		this.#propagate()		
+	}
+
 	remove(handler: RouteHandler){
 		let i = this.#routes.indexOf(handler)
+		let ok = false
 		if(i >= 0){
 			this.#routes.splice(i,1)
-			this.#propagate()
+			ok = true 
 		}
 		else{
 			i = this.#native.indexOf(handler)
 			if(i >= 0){
 				this.#native.splice(i,1)
-				this.#manager.updateChanges()
+				ok = true 
+			}
+			else{
+				i = this.#defaults.indexOf(handler)
+				if(i >= 0){
+					this.#defaults.splice(i,1)
+					ok = true 
+				}	
 			}
 		}
-		
+
+		if(ok) this.#propagate()		
 	}
 
 	async #propagate(){
@@ -200,7 +234,7 @@ export class Router {
 	}
 
 	protected async $updateServer(server?: Server){
-		await server.setRoutes(this.#routes)
+		await server.setRoutes([...this.#routes, ...this.#defaults])
 	}
 }
 
@@ -213,9 +247,17 @@ export class Manager extends AsyncEventEmitter{
 	#caddy: Caddy
 	#servers = new Map<string, Server>()
 	#serverHandler : ModuleInfo 
+	#startupHandler: ModuleInfo
 	#router : Router
 	#hosts = new Set<HostConfig>()
 	#defaultRoute:any 
+
+	client: Tmux
+
+	startup = {
+		url: '',
+		method: ''
+	}
 
 
 
@@ -286,6 +328,10 @@ export class Manager extends AsyncEventEmitter{
 		}
 	}
 
+	get config(){
+		return this.#config
+	}
+
 
 	get hosts(){
 		return this.#hosts
@@ -316,12 +362,22 @@ export class Manager extends AsyncEventEmitter{
 		}
 	}
 
+	async setStartupHandler(handler: ModuleInfo){
+		this.#startupHandler = handler
+		let keys = this.#servers.keys()
+		for(let key of keys){
+			await this.#servers.get(key).setStartupHandler(handler)
+		}
+	}
 
 
 	async $addCluster(id: string, server: Server){
 		this.#servers.set(id, server)
 		if(this.#serverHandler){
 			await server.setCustomHandler(this.#serverHandler)
+		}
+		if(this.#startupHandler){
+			await server.setStartupHandler(this.#startupHandler)
 		}
 		if(this.#router){
 			this.#router["$updateServer"](server)
@@ -430,10 +486,6 @@ export class Manager extends AsyncEventEmitter{
 			
 		}
 
-		
-		
-		
-
 		this.#caddy.config.apps = {
 			http: {
 				http_port: this.#config.port,
@@ -466,15 +518,29 @@ export class Manager extends AsyncEventEmitter{
 
 		let createProcess = async (i: number) => {
 			let proid = `ws${i}`
-			let pro = await client.createProcess(proid)
-			let file = import.meta.url
-			await pro.start(process.argv[0], [kawix.filename, file, "--dynwid=" + this.#rid, "--cluster", "--id=" + proid, "--address=" + this.#socket_addresses[i]])
+			let file = __filename //import.meta.url
+			let startupArgs = []
+			if(this.startup.url && this.startup.method){
+				startupArgs.push("--startup-url=" + this.startup.url)
+				startupArgs.push("--startup-method=" + this.startup.method)
+			}
+			let pro = await client.createProcess({
+				id: proid,
+				autorestart: true,
+				cmd: process.argv[0],
+				args: [kawix.filename, file, "--dynwid=" + this.#rid, "--cluster", "--id=" + proid, "--address=" + this.#socket_addresses[i], ...startupArgs],
+				env: Object.assign({}, process.env, {
+					RUN_DYNW: 1
+				})
+			})
+			await pro.start()
+			//await pro.start(process.argv[0], )
 		}
 
 		for(let i=0;i<this.#config.cpus;i++){
 			let pro = await client.getProcess(`ws${i}`)
 			if(pro){
-				await client.delete(pro.id)
+				await client.delete(pro.info.id)
 			}
 			await createProcess(i)
 		}
@@ -482,12 +548,21 @@ export class Manager extends AsyncEventEmitter{
 		this.emit("clusters-started")
 		
 		let cmd = await this.#caddy.getCmd()
-		let pro = await client.createProcess("caddy")
+		//let pro = await client.createProcess("caddy")
 		if(this.#config.startup?.asroot){
 			cmd.args = [cmd.bin, ...cmd.args]
 			cmd.bin = "sudo"
 		}
-		await pro.start(cmd.bin, cmd.args)
+
+		let pro = await client.createProcess({
+			id: "caddy",
+			cmd: cmd.bin,
+			args: cmd.args,
+			env: process.env
+		})
+		await pro.start()
+		
+		//await pro.start(cmd.bin, cmd.args)
 		this.emit("caddy-started")
 	}
 
@@ -593,20 +668,26 @@ export class Manager extends AsyncEventEmitter{
 
 
 	async #connectTmux(){
-		let tmuxid = this.#rid
-		
+		let tmuxid = this.#rid		
 		this.emit("tmux-check")
 	
 		
 		// this starts a local server
-		let client = new Tmux(tmuxid)
+		let client = this.client = new Tmux(tmuxid)
+		/*
 		if(await client.checkLocalServer()){
 			throw Exception.create(`Tmux client with id ${tmuxid} yet started`).putCode("TMUX_STARTED")
 		}
+		*/
+		
 		
 
 		let server = new MeshaServer()
 		server.on("error", console.error)
+		server.shared.set("getObject", ()=> client)
+		server.shared.set("manager", this)
+
+		/*
 		server.on("client", (socket : ClientSocket)=>{
 			let rpc = new RPC()
 			rpc.channel = socket
@@ -618,10 +699,12 @@ export class Manager extends AsyncEventEmitter{
 				rpc = null
 			})
 		})		
-		await client.init()
+		*/
 
-		
-		await server.startLocal(tmuxid)
+
+
+		await client.init()
+		await server.bind("local+" + tmuxid)
 		this.emit("tmux-started")
 
 		let onexit = async() => {
