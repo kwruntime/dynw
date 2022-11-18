@@ -518,7 +518,7 @@ export class Manager extends AsyncEventEmitter{
 
 		let createProcess = async (i: number) => {
 			let proid = `ws${i}`
-			let file = __filename //import.meta.url
+			let file = import.meta.url
 			let startupArgs = []
 			if(this.startup.url && this.startup.method){
 				startupArgs.push("--startup-url=" + this.startup.url)
