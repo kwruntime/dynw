@@ -56,14 +56,15 @@ export type RouteHandler = RouteStaticHandler | RouteModuleHandler | RouteNative
 export interface Config extends HostConfig{
 	id?: string
 	cpus?: number
-
 	startup?: {
 		asroot?: boolean
 	}
+	hosts?: Array<HostConfig>
 }
 
 export interface HostConfig{
 	host: string 
+	names?: Array<string>,
 	port?: number
 	https_port?: number 
 	ssl?: {
@@ -75,6 +76,7 @@ export interface HostConfig{
 		dial: string
 	}]
 	config?: CaddyHttpServer
+	routes?: Array<any>
 }
 
 
@@ -281,6 +283,11 @@ export class Manager extends AsyncEventEmitter{
 	constructor(config: Config){
 		super()
 		this.#config = Object.assign(defaultConfig, config)
+		if(this.#config.hosts instanceof Array){
+			for(let host of this.#config.hosts){
+				this.#hosts.add(host)
+			}
+		}
 		let res = Manager.getLocalId(this.#config.id)
 
 		
@@ -373,6 +380,8 @@ export class Manager extends AsyncEventEmitter{
 
 	async $addCluster(id: string, server: Server){
 		this.#servers.set(id, server)
+
+		
 		if(this.#serverHandler){
 			await server.setCustomHandler(this.#serverHandler)
 		}
@@ -442,6 +451,29 @@ export class Manager extends AsyncEventEmitter{
 
 		
 		let defRoute = Object.assign({}, this.#defaultRoute)
+		if(hconfig.names?.length){
+			defRoute.match =defRoute.match || []
+			defRoute.match.push({
+				host: hconfig.names
+			})
+		}
+
+		let nroutes = []
+		if(hconfig.routes?.length){
+			for(let route of hconfig.routes){
+				/*
+				if(hconfig.names?.length){
+					route.match = route.match || []
+					route.match.push({
+						host: hconfig.names 
+					})
+				}
+				*/
+				
+				nroutes.push(route)
+			}
+		}
+
 		if(hconfig.upstreams){
 			defRoute.handle = [defRoute.handle[0]]
 			defRoute.handle[0] = Object.assign({}, defRoute.handle[0])
@@ -450,16 +482,19 @@ export class Manager extends AsyncEventEmitter{
 		let rconfig = {
 			listen,
 			routes: [
-				defRoute
+				defRoute,
+				...nroutes
 			],
 			tls_connection_policies
 		}
 		return rconfig
 	}
 
-	async startServer(){
+	async startServer(startup?: string){
 		let client = await this.#connectTmux()
-
+		if(!startup){
+			startup = import.meta.url 
+		}
 		
 		let upstreams:any = []
 		if(Os.platform() == "win32"){
@@ -518,7 +553,7 @@ export class Manager extends AsyncEventEmitter{
 
 		let createProcess = async (i: number) => {
 			let proid = `ws${i}`
-			let file = import.meta.url
+			let file = startup //import.meta.url
 			let startupArgs = []
 			if(this.startup.url && this.startup.method){
 				startupArgs.push("--startup-url=" + this.startup.url)
