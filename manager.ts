@@ -69,6 +69,7 @@ export interface HostConfig{
 	https_port?: number 
 	ssl?: {
 		automatic?: boolean 
+		automate?: Array<string>
 		key?: string 
 		cert?: string 
 	}
@@ -406,70 +407,87 @@ export class Manager extends AsyncEventEmitter{
 		if(hconfig.https_port) ports.push(hconfig.https_port)
 		const listen = ports.map((a) => ":" + a)
 
-		let tls_connection_policies = null 
-		if(hconfig.ssl && !hconfig.ssl.automatic){
+		let tls_connection_policies = [] 
+		if(hconfig.ssl){
 
-			if(!hconfig.ssl["uid"]){
-				Object.defineProperty(hconfig.ssl, "uid",{
-					value: uniqid(),
-					enumerable: false
-				})
-			}
-
-			tls_connection_policies = [
-				{
-					"certificate_selection": {
-						"any_tag": [hconfig.ssl["uid"]]
-					}
-				}
-			]
-
-			let tls = this.#caddy.config.apps["tls"]
+			let tls = this.#caddy.config.apps["tls"]			
 			if(!tls){
 				tls = {
 					certificates: {
-						load_files: []
+						load_files: [],
+						load_pem: []
 					}
 				}
 				this.#caddy.config.apps["tls"] = tls
 			}
-			let certconfig = tls.certificates.load_files.filter((a) => a.tags[0] == hconfig.ssl["uid"])[0]
-			if(!certconfig){
-				certconfig = {
-					certificate: '',
-					key: '',
-					format:'pem',
-					tags: [hconfig.ssl["uid"]]
-				}
-				tls.certificates.load_files.push(certconfig)
+			
+			/*
+			if(hconfig.ssl.automate?.length){
+				tls.certificates.automate = hconfig.ssl.automate
+			}
+			*/
+
+			if(hconfig.names?.length){
+				tls_connection_policies.push({
+					match: {
+						sni: hconfig.names
+					},
+					certificate_selection: {
+						any_tag: []
+					}
+				})
 			}
 
-			certconfig.certificate = hconfig.ssl.cert
-			certconfig.key = hconfig.ssl.key
+
+			if(hconfig.ssl.cert && hconfig.ssl.key){
+				if(!hconfig.ssl["uid"]){
+					Object.defineProperty(hconfig.ssl, "uid",{
+						value: uniqid(),
+						enumerable: false
+					})
+				}
+				
+
+				tls_connection_policies .push({
+					"certificate_selection": {
+						"any_tag": [hconfig.ssl["uid"]]
+					}
+				})
+				
+
+				let ispem = false
+				let pemLoader = tls.certificates.load_files
+				if(hconfig.ssl.cert.startsWith("-----BEGIN")){
+					pemLoader = tls.certificates.load_pem
+					ispem = true
+				}
+				let certconfig = pemLoader.filter((a) => a.tags[0] == hconfig.ssl["uid"])[0]
+				if(!certconfig){
+					certconfig = {
+						certificate: '',
+						key: '',
+						tags: [hconfig.ssl["uid"]]
+					}
+					if(!ispem)
+						certconfig.format = 'pem'
+					tls.certificates.load_files.push(certconfig)
+				}
+				certconfig.certificate = hconfig.ssl.cert
+				certconfig.key = hconfig.ssl.key
+				
+			}
 			
 		}
 
 		
 		let defRoute = Object.assign({}, this.#defaultRoute)
-		if(hconfig.names?.length){
-			defRoute.match =defRoute.match || []
-			defRoute.match.push({
-				host: hconfig.names
-			})
-		}
+		let aroutes = []
+		
+		
 
 		let nroutes = []
 		if(hconfig.routes?.length){
-			for(let route of hconfig.routes){
-				/*
-				if(hconfig.names?.length){
-					route.match = route.match || []
-					route.match.push({
-						host: hconfig.names 
-					})
-				}
-				*/
-				
+			for(let route of hconfig.routes){		
 				nroutes.push(route)
 			}
 		}
@@ -479,14 +497,121 @@ export class Manager extends AsyncEventEmitter{
 			defRoute.handle[0] = Object.assign({}, defRoute.handle[0])
 			defRoute.handle[0].upstreams = hconfig.upstreams
 		}
+
+		if(hconfig.names?.length){
+			let route1 = Object.assign({}, defRoute)
+			route1.match = route1.match || []
+			route1.match.push({
+				host: hconfig.names
+			})
+			aroutes.push(route1)
+		}
+		aroutes.push(defRoute)
+
+
 		let rconfig = {
 			listen,
 			routes: [
-				defRoute,
+				...aroutes,
 				...nroutes
 			],
 			tls_connection_policies
 		}
+
+
+		if(this.#router){
+			let route : any 
+			let currentRoutes = rconfig.routes
+			rconfig.routes = []
+
+
+			for(let routeHandler of this.#router.native){
+				if(routeHandler["path"]){
+					routeHandler["match"] = [
+						{
+							path: [routeHandler["path"]]
+						}
+					]
+				}
+				let h = routeHandler as RouteStaticHandler
+				if(h.static){
+					if(h.path && (h.path.indexOf("*") <= 0)){
+						routeHandler["match"] = [
+							{
+								path: [h.path + "/*"]
+							}
+						]
+					}
+					let path_prefix = h.static.path_prefix
+					if(!path_prefix && h.path){
+						path_prefix = h.path
+						if(path_prefix.endsWith("*")){
+							path_prefix = Path.posix.dirname(path_prefix)
+						}
+					}
+					route = {
+						match: h.match,
+						handle: [
+							{
+								handler:'rewrite',
+								strip_path_prefix: path_prefix
+							},
+							{
+								handler:'file_server',
+								root: h.static.root
+							}
+						]
+					}
+
+
+					if(hconfig.names?.length){
+						route.match = defRoute.match || []
+						route.match.push({
+							host: hconfig.names
+						})
+					}
+					rconfig.routes.push(route)
+				}
+				else{
+					if(routeHandler["config"]){
+						rconfig.routes.push(routeHandler["config"])
+					}
+					else if(routeHandler["module"]){
+						route = {
+							match: routeHandler["match"],
+							handle: [
+								{
+									handler:'reverse_proxy',
+									upstreams: this.#defaultRoute.handle[0].upstreams,
+									headers: {
+										request: {
+											set: {
+												"caddy-web-url": ["{http.request.uri}"]
+											},
+											add: {
+												"module-uid": [routeHandler["moduleId"]]
+											}
+										}
+									}
+								}
+							]
+						}
+						if(hconfig.names?.length){
+							route.match = defRoute.match || []
+							route.match.push({
+								host: hconfig.names
+							})
+						}
+						rconfig.routes.push(route)
+					}
+
+				}
+			}
+			
+			//defaultserver.routes.push(this.#defaultRoute)
+			rconfig.routes.push(...currentRoutes)
+		}
+
 		return rconfig
 	}
 
@@ -494,16 +619,13 @@ export class Manager extends AsyncEventEmitter{
 		let client = await this.#connectTmux()
 		if(!startup){
 			startup = import.meta.url 
-		}
-		
+		}		
 		let upstreams:any = []
 		if(Os.platform() == "win32"){
 		}
 		else{
 			upstreams = this.#socket_addresses.map((a) => ({dial: "unix/" + a.substring(7)}))
 		}
-
-
 		this.#defaultRoute = {
 			handle: [
 				{
@@ -520,7 +642,6 @@ export class Manager extends AsyncEventEmitter{
 			]
 			
 		}
-
 		this.#caddy.config.apps = {
 			http: {
 				http_port: this.#config.port,
@@ -528,9 +649,9 @@ export class Manager extends AsyncEventEmitter{
 				servers: {
 				}
 			}
-		}
-		this.#caddy.config.apps.http.servers[this.#config.host] = this.#processConfig(this.#config)
-
+		}		
+		//this.#caddy.config.apps.http.servers[this.#config.host] = this.#processConfig(this.#config)
+		await this.$updateChanges()
 
 		client.on("status:listen", (event) => {
 			let id = event.id 
@@ -546,8 +667,8 @@ export class Manager extends AsyncEventEmitter{
 				upstreams[i] = {
 					dial: `${addr.address}:${addr.port}`
 				}
-				this.updateChanges()
 			}
+			this.updateChanges()
 		})
 
 
@@ -583,7 +704,6 @@ export class Manager extends AsyncEventEmitter{
 		this.emit("clusters-started")
 		
 		let cmd = await this.#caddy.getCmd()
-		//let pro = await client.createProcess("caddy")
 		if(this.#config.startup?.asroot){
 			cmd.args = [cmd.bin, ...cmd.args]
 			cmd.bin = "sudo"
@@ -592,115 +712,45 @@ export class Manager extends AsyncEventEmitter{
 		let pro = await client.createProcess({
 			id: "caddy",
 			cmd: cmd.bin,
+			autorestart: true,
 			args: cmd.args,
 			env: process.env
 		})
-		await pro.start()
-		
+		await pro.start()		
 		//await pro.start(cmd.bin, cmd.args)
 		this.emit("caddy-started")
 	}
 
-	async updateChanges(){
+	updateChanges(){
 		if(this.updateChanges["timer"]){
 			clearTimeout(this.updateChanges["timer"])
 		}
 		this.updateChanges["timer"] = setTimeout(async ()=> {
 			try{
-
-				this.#caddy.config.apps.http.servers = {}
-				let defaultserver = this.#processConfig(this.#config)
-				
-			
-				if(this.#router){
-					let route : any 
-					defaultserver.routes = []
-					for(let routeHandler of this.#router.native){
-						if(routeHandler["path"]){
-							routeHandler["match"] = [
-								{
-									path: [routeHandler["path"]]
-								}
-							]
-						}
-						let h = routeHandler as RouteStaticHandler
-						if(h.static){
-							if(h.path && (h.path.indexOf("*") <= 0)){
-								routeHandler["match"] = [
-									{
-										path: [h.path + "/*"]
-									}
-								]
-							}
-							let path_prefix = h.static.path_prefix
-							if(!path_prefix && h.path){
-								path_prefix = h.path
-								if(path_prefix.endsWith("*")){
-									path_prefix = Path.posix.dirname(path_prefix)
-								}
-							}
-							route = {
-								match: h.match,
-								handle: [
-									{
-										handler:'rewrite',
-										strip_path_prefix: path_prefix
-									},
-									{
-										handler:'file_server',
-										root: h.static.root
-									}
-								]
-							}
-							defaultserver.routes.push(route)
-						}
-						else{
-							if(routeHandler["config"]){
-								defaultserver.routes.push(routeHandler["config"])
-							}
-							else if(routeHandler["module"]){
-								route = {
-									match: routeHandler["match"],
-									handle: [
-										{
-											handler:'reverse_proxy',
-											upstreams: this.#defaultRoute.handle[0].upstreams,
-											headers: {
-												request: {
-													set: {
-														"caddy-web-url": ["{http.request.uri}"]
-													},
-													add: {
-														"module-uid": [routeHandler["moduleId"]]
-													}
-												}
-											}
-										}
-									]
-								}
-								defaultserver.routes.push(route)
-							}
-
-						}
-					}
-					defaultserver.routes.push(this.#defaultRoute)
-				}
-
-				for(let hostConfig of this.#hosts){					
-					let c = this.#caddy.config.apps.http.servers[hostConfig.host] = this.#processConfig(hostConfig, this.#config)
-					if(!c.routes){
-						c.routes = defaultserver.routes
-					}
-				}
-				this.#caddy.config.apps.http.servers[this.#config.host] = defaultserver
-				delete this.updateChanges["timer"]
-				await this.#caddy.update()
+				await this.$updateChanges()
 			}catch(e){
 				this.emit("caddy-error", e)
+			}finally{
+				delete this.updateChanges["timer"]
 			}
 		}, 100)
 	}
 
+
+	async $updateChanges(){
+		this.#caddy.config.apps.http.servers = {}
+		let defaultserver = this.#processConfig(this.#config)
+		for(let hostConfig of this.#hosts){				
+			//let c = 
+			this.#caddy.config.apps.http.servers[hostConfig.host] = this.#processConfig(hostConfig, this.#config)
+
+			/*if(!c.routes){
+				c.routes = defaultserver.routes
+			}*/
+		}
+		this.#caddy.config.apps.http.servers[this.#config.host] = defaultserver		
+		await this.#caddy.update()
+	}
 
 	async #connectTmux(){
 		let tmuxid = this.#rid		
