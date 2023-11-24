@@ -1,15 +1,15 @@
 //import {Server as HttpServer} from 'github://kwruntime/std@1a17653/http/server.ts'
 //import {Router} from 'github://kwruntime/std@1a17653/http/router.ts'
 
-import {Server as HttpServer} from 'github://kwruntime/std@4fe87b1/http/server.ts'
-import {Router} from 'github://kwruntime/std@4fe87b1/http/router.ts'
+import {Server as HttpServer} from 'github://kwruntime/std@9cd3589/http/server.ts'
+import {Router} from 'github://kwruntime/std@9cd3589/http/router.ts'
 
-import {HttpContext} from 'github://kwruntime/std@4fe87b1/http/context.ts'
+import {HttpContext} from 'github://kwruntime/std@9cd3589/http/context.ts'
 import { Manager } from './manager.ts'
 
-import {JsonParser} from 'github://kwruntime/std@4fe87b1/http/parsers/json.ts'
-import {TextParser} from 'github://kwruntime/std@4fe87b1/http/parsers/text.ts'
-import {FormEncoded} from 'github://kwruntime/std@4fe87b1/http/parsers/form-encoded.ts'
+import {JsonParser} from 'github://kwruntime/std@9cd3589/http/parsers/json.ts'
+import {TextParser} from 'github://kwruntime/std@9cd3589/http/parsers/text.ts'
+import {FormEncoded} from 'github://kwruntime/std@9cd3589/http/parsers/form-encoded.ts'
 const shareSymbol = Symbol("share")
 
 export interface ModuleInfo{
